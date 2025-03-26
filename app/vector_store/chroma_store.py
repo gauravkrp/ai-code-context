@@ -1,202 +1,240 @@
 """
-Vector database module using ChromaDB for storing and retrieving code embeddings.
+ChromaDB vector store implementation with enhanced code chunking.
 """
-import os
 import logging
 from typing import List, Dict, Any, Optional
-
+from pathlib import Path
 import chromadb
-from chromadb.utils import embedding_functions
+from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
-import numpy as np
+import time
 
 from app.config.settings import config
+from app.utils.logger import setup_logger
+from app.utils.code_chunker import CodeChunk, CodeChunker
 
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__, "logs/vector_store.log")
 
-class ChromaVectorStore:
-    """ChromaDB vector store for code embeddings."""
+class ChromaStore:
+    """ChromaDB vector store implementation."""
     
-    def __init__(
-        self, 
-        persistence_directory: str = None, 
-        collection_name: str = None,
-        embedding_model: str = "all-MiniLM-L6-v2"
-    ):
-        """
-        Initialize the ChromaDB vector store.
+    def __init__(self):
+        """Initialize the vector store."""
+        # Store config
+        self.config = config.vector_store
         
-        Args:
-            persistence_directory: Directory to persist ChromaDB data.
-              If None, uses the directory from config.
-            collection_name: Name of the ChromaDB collection to use.
-              If None, uses the name from config.
-            embedding_model: Name of the SentenceTransformer model to use for embeddings.
-        """
-        self.persistence_directory = persistence_directory or config.vector_store.persistence_directory
-        self.collection_name = collection_name or config.vector_store.collection_name
-        self.embedding_model_name = embedding_model
+        # Create persistence directory if it doesn't exist
+        persistence_dir = Path(self.config.persistence_dir)
+        persistence_dir.mkdir(exist_ok=True, parents=True)
         
-        # Ensure persistence directory exists
-        os.makedirs(self.persistence_directory, exist_ok=True)
+        logger.info(f"Using ChromaDB persistence directory: {persistence_dir.absolute()}")
         
-        # Initialize ChromaDB client with persistence
-        self.client = chromadb.PersistentClient(path=self.persistence_directory)
+        try:
+            # Use Client with SQLite settings for reliable persistence
+            logger.info(f"Initializing ChromaDB Client with SQLite and path: {persistence_dir.absolute()}")
+            
+            settings = Settings(
+                persist_directory=str(persistence_dir.absolute()),
+                anonymized_telemetry=False,
+                is_persistent=True,
+                allow_reset=True
+            )
+            
+            self.client = chromadb.Client(settings)
+            
+            # List existing collections
+            collections = self.client.list_collections()
+            logger.info(f"Found existing collections: {[c.name for c in collections]}")
+            
+            # Get or create collection with explicit distance function
+            logger.info(f"Getting or creating collection: {self.config.collection_name}")
+            self.collection = self.client.get_or_create_collection(
+                name=self.config.collection_name,
+                metadata={"hnsw:space": "cosine"}
+            )
+            
+            # Log collection count
+            count = self.collection.count()
+            logger.info(f"Collection '{self.config.collection_name}' contains {count} documents")
+            
+            # Initialize embedding model
+            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            
+            # Initialize chunker
+            self.chunker = CodeChunker(
+                chunk_size=config.chunking.chunk_size,
+                chunk_overlap=config.chunking.chunk_overlap
+            )
         
-        # Initialize the embedding model
-        self.embedding_model = SentenceTransformer(self.embedding_model_name)
-        
-        # Create embedding function
-        self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=self.embedding_model_name
-        )
-        
-        # Get or create collection
-        self.collection = self.client.get_or_create_collection(
-            name=self.collection_name,
-            embedding_function=self.embedding_function,
-            metadata={"hnsw:space": "cosine"}
-        )
-        
-        logger.info(f"Initialized ChromaDB Vector Store with collection: {self.collection_name}")
+        except Exception as e:
+            logger.error(f"Error initializing ChromaDB: {str(e)}")
+            logger.exception("Exception details:")
+            raise
     
-    def add_documents(self, documents: List[Dict[str, Any]]) -> None:
+    def add_documents(
+        self,
+        documents: List[Dict[str, Any]],
+        batch_size: int = None
+    ) -> None:
         """
         Add documents to the vector store.
         
         Args:
-            documents: List of document dictionaries with the following structure:
-                {
-                    'id': str,              # Unique identifier
-                    'content': str,         # Text content to embed
-                    'metadata': Dict        # Additional metadata
-                }
+            documents: List of documents to add
+            batch_size: Optional batch size for processing
         """
         if not documents:
-            logger.warning("No documents provided to add_documents")
+            logger.warning("No documents provided to add to vector store")
             return
-        
-        # Extract document components
-        ids = [doc['id'] for doc in documents]
-        contents = [doc['content'] for doc in documents]
-        metadatas = [doc['metadata'] for doc in documents]
-        
-        # Add documents to ChromaDB collection
+            
         try:
-            self.collection.add(
-                ids=ids,
-                documents=contents,
-                metadatas=metadatas
-            )
-            logger.info(f"Added {len(documents)} documents to vector store")
+            # Use configured batch size if not specified
+            batch_size = batch_size or self.config.batch_size
+            total_batches = (len(documents) + batch_size - 1) // batch_size
+            
+            logger.info(f"Starting indexing of {len(documents)} documents in {total_batches} batches")
+            start_time = time.time()
+            
+            # Process documents in batches
+            for i in range(0, len(documents), batch_size):
+                batch_num = (i // batch_size) + 1
+                batch = documents[i:i + batch_size]
+                
+                # Log batch start with progress percentage
+                progress = (batch_num / total_batches) * 100
+                logger.info(f"Processing batch {batch_num}/{total_batches} ({progress:.1f}%) - {len(batch)} documents")
+                
+                # Process each document
+                processed_batch = []
+                batch_ids = []
+                for j, doc in enumerate(batch):
+                    processed_doc = doc.copy()
+                    
+                    # Ensure required metadata exists
+                    metadata = processed_doc.get('metadata', {})
+                    if not metadata:
+                        # Create basic metadata from document fields
+                        metadata = {
+                            'file_path': processed_doc.get('file_path', ''),
+                            'language': processed_doc.get('language', 'unknown'),
+                            'size': processed_doc.get('size', 0),
+                            'timestamp': processed_doc.get('timestamp', '')
+                        }
+                    
+                    # Convert any list or dict values to strings
+                    metadata = {
+                        k: str(v) if isinstance(v, (list, dict)) else v
+                        for k, v in metadata.items()
+                    }
+                    
+                    processed_doc['metadata'] = metadata
+                    processed_batch.append(processed_doc)
+                    
+                    # Create a deterministic but unique ID based on content and file path
+                    # This helps with deduplication and makes IDs consistent across runs
+                    file_path = metadata.get('file_path', '')
+                    # Replace special characters with '_' to make safe IDs
+                    safe_path = ''.join(c if c.isalnum() else '_' for c in file_path)
+                    # Use a positive hash value
+                    content_hash = abs(hash(processed_doc['content'][:100])) if processed_doc.get('content') else 0
+                    doc_id = f"doc_{safe_path}_{content_hash}_{i+j}"
+                    batch_ids.append(doc_id)
+                
+                # Add batch to collection
+                self.collection.add(
+                    documents=[doc['content'] for doc in processed_batch],
+                    metadatas=[doc['metadata'] for doc in processed_batch],
+                    ids=batch_ids
+                )
+                
+                # Verify documents were added
+                current_count = self.collection.count()
+                logger.info(f"Verified document count after batch: {current_count}")
+                
+                # Log batch completion
+                logger.info(f"Completed batch {batch_num}/{total_batches} ({progress:.1f}%)")
+            
+            # Log overall completion with timing
+            elapsed_time = time.time() - start_time
+            docs_per_second = len(documents) / elapsed_time if elapsed_time > 0 else 0
+            logger.info(f"Successfully indexed {len(documents)} documents in {elapsed_time:.2f} seconds ({docs_per_second:.2f} docs/sec)")
+            
         except Exception as e:
             logger.error(f"Error adding documents to vector store: {e}")
+            logger.error("Indexing failed - please check the error and try again")
             raise
     
     def search(
         self, 
         query: str, 
-        n_results: int = 5, 
-        where: Dict[str, Any] = None
+        n_results: int = 5,
+        filter_criteria: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """
-        Search the vector store for relevant documents.
+        Search for similar documents.
         
         Args:
-            query: The search query.
-            n_results: Number of results to return.
-            where: Filter condition for metadata fields.
+            query: Search query
+            n_results: Number of results to return
+            filter_criteria: Optional filtering criteria
             
         Returns:
-            List of result dictionaries with structure:
-                {
-                    'id': str,              # Document ID
-                    'content': str,         # Document content
-                    'metadata': Dict,       # Document metadata
-                    'similarity': float     # Similarity score
-                }
+            List[Dict[str, Any]]: List of similar documents with metadata
         """
         try:
-            search_results = self.collection.query(
-                query_texts=[query],
-                n_results=n_results,
+            # Log search details
+            logger.info(f"Searching for query: '{query}' with n_results={n_results}")
+            logger.info(f"Filter criteria: {filter_criteria}")
+            
+            # Log collection stats
+            collection_count = self.collection.count()
+            logger.info(f"Collection '{self.config.collection_name}' contains {collection_count} documents")
+            
+            # Create query embedding
+            query_embedding = self.embedding_model.encode(query).tolist()
+            
+            # Prepare where clause for filtering
+            where = filter_criteria if filter_criteria else None
+            
+            # Search in ChromaDB
+            results = self.collection.query(
+                query_embeddings=[query_embedding],
+                n_results=min(n_results, collection_count) if collection_count > 0 else n_results,
                 where=where
             )
             
-            # Format the results
-            results = []
-            for i in range(len(search_results['ids'][0])):
-                results.append({
-                    'id': search_results['ids'][0][i],
-                    'content': search_results['documents'][0][i],
-                    'metadata': search_results['metadatas'][0][i],
-                    'similarity': search_results['distances'][0][i] if 'distances' in search_results else None
-                })
+            # Format results
+            formatted_results = []
+            if 'documents' in results and len(results['documents']) > 0 and len(results['documents'][0]) > 0:
+                for i in range(len(results['documents'][0])):
+                    doc_data = {
+                        'content': results['documents'][0][i],
+                        'metadata': results['metadatas'][0][i],
+                        'distance': results['distances'][0][i] if 'distances' in results else None
+                    }
+                    formatted_results.append(doc_data)
+                
+                # Log sample results
+                logger.info(f"Top result similarity: {1 - formatted_results[0]['distance'] if formatted_results[0]['distance'] is not None else 'N/A'}")
+                for i, result in enumerate(formatted_results[:2]):  # Log top 2 results
+                    metadata_str = ', '.join([f"{k}: {v}" for k, v in result['metadata'].items() if k in ['file_path', 'language']])
+                    content_preview = result['content'][:100] + "..." if len(result['content']) > 100 else result['content']
+                    logger.info(f"Result {i+1}: {metadata_str} - Content: {content_preview}")
+            else:
+                logger.warning(f"No documents found in search results for query: '{query}'")
             
-            return results
-        
+            logger.info(f"Found {len(formatted_results)} results for query: {query}")
+            return formatted_results
+            
         except Exception as e:
             logger.error(f"Error searching vector store: {e}")
+            logger.exception("Search exception details:")
             return []
     
-    def get_document(self, document_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Retrieve a document by its ID.
-        
-        Args:
-            document_id: The document ID.
-            
-        Returns:
-            Document dictionary or None if not found.
-        """
+    def clear(self) -> None:
+        """Clear all documents from the vector store."""
         try:
-            result = self.collection.get(ids=[document_id])
-            
-            if result and len(result['ids']) > 0:
-                return {
-                    'id': result['ids'][0],
-                    'content': result['documents'][0],
-                    'metadata': result['metadatas'][0]
-                }
-            return None
-        
+            self.collection.delete(where={})
+            logger.info("Cleared all documents from vector store")
         except Exception as e:
-            logger.error(f"Error retrieving document {document_id}: {e}")
-            return None
-    
-    def delete_document(self, document_id: str) -> bool:
-        """
-        Delete a document from the vector store.
-        
-        Args:
-            document_id: The document ID to delete.
-            
-        Returns:
-            True if successful, False otherwise.
-        """
-        try:
-            self.collection.delete(ids=[document_id])
-            return True
-        except Exception as e:
-            logger.error(f"Error deleting document {document_id}: {e}")
-            return False
-    
-    def clear_collection(self) -> bool:
-        """
-        Remove all documents from the collection.
-        
-        Returns:
-            True if successful, False otherwise.
-        """
-        try:
-            self.collection.delete()
-            # Recreate the collection
-            self.collection = self.client.get_or_create_collection(
-                name=self.collection_name,
-                embedding_function=self.embedding_function,
-                metadata={"hnsw:space": "cosine"}
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Error clearing collection: {e}")
-            return False 
+            logger.error(f"Error clearing vector store: {e}") 

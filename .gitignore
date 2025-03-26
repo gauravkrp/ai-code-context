@@ -77,3 +77,7 @@ coverage.xml
 .env.development.local
 .env.test.local
 .env.production.local 
+
+.embedding_cache/*
+/chroma_db/*
+/chroma_db

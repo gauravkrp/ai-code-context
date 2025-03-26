@@ -1,186 +1,210 @@
 """
-LLM interaction module to handle different LLM providers.
+LLM client for code querying.
 """
 import logging
-from typing import Dict, List, Optional, Any
-import json
-import httpx
-
+from typing import Dict, Any, Optional
+import openai
 from anthropic import Anthropic
-from openai import OpenAI
 
 from app.config.settings import config
+from app.utils.logger import setup_logger
 
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__, "logs/llm.log")
 
-class LLMHandler:
-    """Handler for interacting with different LLM providers."""
+class LLMClient:
+    """LLM client for code querying."""
     
     def __init__(self):
-        """Initialize the LLM handler."""
-        self.initialized = False
-        self.anthropic_client = None
-        self.openai_client = None
-        
-        # Initialize the appropriate LLM client
-        self._initialize_clients()
-    
-    def _initialize_clients(self):
-        """Initialize the LLM clients based on configuration."""
-        # Initialize Anthropic client if enabled
-        if config.llm.use_claude and config.llm.anthropic_api_key:
-            try:
-                self.anthropic_client = Anthropic(api_key=config.llm.anthropic_api_key)
-                logger.info("Anthropic Claude client initialized")
-            except Exception as e:
-                logger.error(f"Error initializing Anthropic client: {e}")
-        
-        # Initialize OpenAI client if enabled
-        if config.llm.use_openai and config.llm.openai_api_key:
-            try:
-                # Create a direct httpx client with no proxy configuration
-                http_client = httpx.Client()
-                
-                # Initialize OpenAI with the custom HTTP client
-                self.openai_client = OpenAI(
-                    api_key=config.llm.openai_api_key,
-                    http_client=http_client
-                )
-                logger.info("OpenAI client initialized")
-            except Exception as e:
-                logger.error(f"Error initializing OpenAI client: {e}")
-        
-        # Check if at least one client is initialized
-        if self.anthropic_client or self.openai_client:
-            self.initialized = True
+        """Initialize the LLM client."""
+        # Initialize OpenAI client
+        if config.llm.openai_api_key:
+            openai.api_key = config.llm.openai_api_key
+            self.use_openai = True
         else:
-            logger.error("No LLM clients initialized. Please check your configuration.")
-    
-    def get_available_llm(self) -> str:
-        """
-        Get the name of the available LLM.
+            self.use_openai = False
         
-        Returns:
-            str: Name of the available LLM client.
-        """
-        if config.llm.use_claude and self.anthropic_client:
-            return "claude"
-        elif config.llm.use_openai and self.openai_client:
-            return "openai"
+        # Initialize Anthropic client
+        if config.llm.anthropic_api_key:
+            self.anthropic = Anthropic(api_key=config.llm.anthropic_api_key)
+            self.use_anthropic = True
         else:
-            return "none"
+            self.use_anthropic = False
+        
+        if not self.use_openai and not self.use_anthropic:
+            raise ValueError("No LLM API keys provided")
+        
+        logger.info(f"Initialized LLM client with OpenAI: {self.use_openai}, Anthropic: {self.use_anthropic}")
     
     def query(
-        self, 
-        prompt: str, 
-        context: List[Dict[str, Any]] = None, 
-        max_tokens: int = None
+        self,
+        query: str,
+        code_context: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        response_format: str = "text"
+    ) -> Any:
+        """
+        Query the LLM with code context.
+        
+        Args:
+            query: User's question
+            code_context: Code context
+            metadata: Optional metadata about the code
+            response_format: Expected response format ("text" or "json")
+            
+        Returns:
+            Any: LLM response (string for text, dict/list for json)
+        """
+        try:
+            # Prepare prompt
+            prompt = self._prepare_prompt(query, code_context, metadata)
+            
+            # Get response from appropriate LLM
+            if self.use_openai:
+                response = self._query_openai(prompt)
+            else:
+                response = self._query_anthropic(prompt)
+            
+            logger.info(f"Generated response for query: {query[:100]}...")
+            
+            # Parse JSON if needed
+            if response_format == "json":
+                try:
+                    import json
+                    # Try to find JSON in the response
+                    json_start = response.find('{')
+                    json_end = response.rfind('}') + 1
+                    if json_start >= 0 and json_end > json_start:
+                        json_str = response[json_start:json_end]
+                        return json.loads(json_str)
+                    else:
+                        logger.warning(f"Could not extract JSON from response: {response[:100]}...")
+                        # Return a basic dict with the response text
+                        return {"text": response}
+                except Exception as e:
+                    logger.error(f"Error parsing JSON response: {e}")
+                    # Return a basic dict with the response text
+                    return {"text": response}
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error querying LLM: {e}")
+            return f"Error generating response: {str(e)}"
+    
+    def _prepare_prompt(
+        self,
+        query: str,
+        context: str,
+        metadata: Optional[Dict[str, Any]] = None
     ) -> str:
         """
-        Query the LLM with a prompt and context.
+        Prepare the prompt for the LLM.
         
         Args:
-            prompt: User prompt/question to ask.
-            context: List of context documents from vector search.
-            max_tokens: Maximum number of tokens to generate.
+            query: User's question
+            context: Code context
+            metadata: Optional metadata about the code
             
         Returns:
-            str: Generated response from the LLM.
+            str: Formatted prompt
         """
-        if not self.initialized:
-            logger.error("LLM handler not initialized. Cannot process query.")
-            return "Sorry, I cannot process your query at this time due to missing LLM configuration."
+        # Build prompt with metadata if available
+        prompt_parts = [
+            "You are a helpful coding assistant who excels at explaining code concepts in clear, natural language. Your goal is to help users understand programming concepts, not just provide code.",
+            f"\nQuestion: {query}",
+            "\nCode Context:",
+            context
+        ]
         
-        # Construct the prompt with context
-        formatted_prompt = self._format_prompt_with_context(prompt, context)
+        if metadata:
+            prompt_parts.extend([
+                "\nCode Metadata:",
+                f"File: {metadata.get('file_path', 'Unknown')}",
+                f"Language: {metadata.get('language', 'Unknown')}",
+                f"Lines: {metadata.get('start_line', 1)}-{metadata.get('end_line', 1)}"
+            ])
         
-        # Use configured max tokens or default
-        max_tokens_to_use = max_tokens or config.llm.max_tokens
+        prompt_parts.extend([
+            "\nPlease provide a clear, conversational explanation in natural language that directly answers the user's question. Focus on concepts and understanding rather than just describing the code. Use simple language that would be accessible to someone learning programming.",
+            "If the answer cannot be determined from the provided code, say so."
+        ])
         
-        # Query the appropriate LLM
-        if config.llm.use_claude and self.anthropic_client:
-            return self._query_claude(formatted_prompt, max_tokens_to_use)
-        elif config.llm.use_openai and self.openai_client:
-            return self._query_openai(formatted_prompt, max_tokens_to_use)
-        else:
-            logger.error("No LLM client available for query.")
-            return "Sorry, I cannot process your query at this time due to missing LLM configuration."
+        return "\n".join(prompt_parts)
     
-    def _format_prompt_with_context(self, prompt: str, context: List[Dict[str, Any]] = None) -> str:
+    def _query_openai(self, prompt: str) -> str:
         """
-        Format the prompt with context information.
+        Query OpenAI's API.
         
         Args:
-            prompt: User prompt/question to ask.
-            context: List of context documents from vector search.
+            prompt: Formatted prompt
             
         Returns:
-            str: Formatted prompt with context.
+            str: OpenAI's response
         """
-        if not context:
-            return f"""
-            You are a helpful assistant that answers questions about code repositories.
-            
-            Question: {prompt}
-            
-            Answer the question as best you can. If you don't know the answer, just say so.
-            """
-        
-        # Format context snippets
-        context_text = ""
-        for i, doc in enumerate(context):
-            metadata = doc.get('metadata', {})
-            file_path = metadata.get('file_path', 'Unknown file')
-            start_line = metadata.get('start_line', 1)
-            end_line = metadata.get('end_line', start_line)
-            
-            context_text += f"\n\nCONTEXT SNIPPET {i+1} (From {file_path}, lines {start_line}-{end_line}):\n```\n{doc['content']}\n```"
-        
-        return f"""
-        You are a helpful assistant that answers questions about code repositories.
-        
-        I'll provide you with code snippets that might be relevant to the question.
-        
-        {context_text}
-        
-        Question: {prompt}
-        
-        When answering:
-        1. Cite specific files and line numbers from the provided context.
-        2. Be specific about where in the code the relevant information is found.
-        3. If the context doesn't contain enough information to answer fully, acknowledge that.
-        4. If a question is about a feature, bug, or implementation detail, explain with references to the specific code.
-        
-        Answer:
-        """
-    
-    def _query_claude(self, prompt: str, max_tokens: int) -> str:
-        """Query the Anthropic Claude model with a prompt."""
         try:
-            response = self.anthropic_client.messages.create(
-                model=config.llm.model_name,
-                max_tokens=max_tokens,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            return response.content[0].text
-        except Exception as e:
-            logger.error(f"Error querying Claude: {e}")
-            return f"Sorry, I encountered an error when processing your query: {str(e)}"
-    
-    def _query_openai(self, prompt: str, max_tokens: int) -> str:
-        """Query the OpenAI model with a prompt."""
-        try:
-            response = self.openai_client.chat.completions.create(
-                model=config.llm.model_name,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that answers questions about code repositories."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_completion_tokens=max_tokens
-            )
+            system_message = "You are a helpful coding assistant who excels at explaining code concepts in clear, natural language. Your goal is to help users understand programming concepts, not just provide code."
+            
+            # For newer API versions, some parameters have been renamed
+            if "gpt-4" in config.llm.model_name or "gpt-3.5" in config.llm.model_name:
+                response = openai.chat.completions.create(
+                    model=config.llm.model_name,
+                    messages=[
+                        {"role": "system", "content": system_message},
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+            # For o3-mini and other models that don't support temperature
+            elif "o3-mini" in config.llm.model_name:
+                response = openai.chat.completions.create(
+                    model=config.llm.model_name,
+                    messages=[
+                        {"role": "system", "content": system_message},
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+            else:
+                # Fall back to using the standard parameters
+                response = openai.chat.completions.create(
+                    model=config.llm.model_name,
+                    messages=[
+                        {"role": "system", "content": system_message},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=config.llm.max_tokens,
+                    temperature=config.llm.temperature
+                )
+            
             return response.choices[0].message.content
+            
         except Exception as e:
             logger.error(f"Error querying OpenAI: {e}")
-            return f"Sorry, I encountered an error when processing your query: {str(e)}" 
+            raise
+    
+    def _query_anthropic(self, prompt: str) -> str:
+        """
+        Query Anthropic's API.
+        
+        Args:
+            prompt: Formatted prompt
+            
+        Returns:
+            str: Anthropic's response
+        """
+        try:
+            response = self.anthropic.messages.create(
+                model=config.llm.model_name,
+                max_tokens=config.llm.max_tokens,
+                temperature=config.llm.temperature,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ]
+            )
+            
+            return response.content[0].text
+            
+        except Exception as e:
+            logger.error(f"Error querying Anthropic: {e}")
+            raise 

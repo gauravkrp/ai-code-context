@@ -213,15 +213,21 @@ def create_document_metadata(file_path: str, content: str) -> Dict[str, Any]:
     
     language = file_type_map.get(extension.lower(), 'Unknown')
     
-    # Create metadata dictionary
+    # Convert lists to strings in code elements
+    def convert_to_string(value):
+        if isinstance(value, list):
+            return ', '.join(str(item) for item in value)
+        return str(value)
+    
+    # Create metadata dictionary with string values
     metadata = {
         'file_path': file_path,
         'extension': extension,
         'language': language,
         'line_count': line_count,
-        'functions': code_elements['functions'],
-        'classes': code_elements['classes'],
-        'variables': code_elements['variables'],
+        'functions': convert_to_string(code_elements['functions']),
+        'classes': convert_to_string(code_elements['classes']),
+        'variables': convert_to_string(code_elements['variables']),
     }
     
     return metadata 
