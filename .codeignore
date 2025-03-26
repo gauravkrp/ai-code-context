@@ -82,3 +82,37 @@ site/
 .Trashes
 ehthumbs.db
 Thumbs.db 
+
+# fern generated files
+.fern/
+generated/fern/
+generated/check/
+
+# Spring generated files
+.spring/
+generated/spring/
+
+# IntelliJ generated files
+.idea/
+
+# PyCharm generated files
+.pycharm/
+generated/pycharm/
+
+# Cursor generated files
+.cursor/
+generated/cursor/
+
+# VSCode generated files
+.vscode/
+generated/vscode/
+
+# WebStorm generated files
+.webstorm/
+generated/webstorm/
+
+# GH actions generated files
+.github/
+
+# GitLab generated files
+.gitlab/

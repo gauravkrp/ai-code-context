@@ -222,11 +222,58 @@ python -m app.main index --repo owner/repo --branch main
 **Parameters:**
 - `--repo`: The GitHub repository to index in the format "owner/repo" (overrides GITHUB_REPOSITORY from .env)
 - `--branch`: The branch to index (overrides GITHUB_BRANCH from .env, defaults to "main")
+- `--force-full`: Force a full re-indexing instead of incremental update (optional)
+- `--list-repos`: List all indexed repositories (optional)
 
-Example:
+**Examples:**
+
+Index a repository for the first time (full indexing):
 ```bash
 python -m app.main index --repo microsoft/TypeScript --branch main
 ```
+
+Update an already indexed repository (incremental indexing):
+```bash
+python -m app.main index --repo microsoft/TypeScript
+```
+
+Force a complete re-indexing of a repository:
+```bash
+python -m app.main index --repo microsoft/TypeScript --force-full
+```
+
+List all indexed repositories:
+```bash
+python -m app.main index --list-repos
+```
+
+### Multiple Repository Support
+
+AI Code Context now supports indexing and querying multiple repositories independently. Each repository is stored in its own vector store collection, ensuring that:
+
+1. Indexing a new repository doesn't overwrite previously indexed repositories
+2. You can switch between repositories without reindexing
+3. Incremental updates only process files that have changed since the last indexing
+
+When querying, the system automatically uses the correct repository:
+
+```bash
+# Query the first repository
+python -m app.main query --repo owner/repo1 --query "How does feature X work?"
+
+# Query a different repository
+python -m app.main query --repo owner/repo2 --query "How does feature Y work?"
+```
+
+### Incremental Indexing
+
+When you re-index an already indexed repository, the system will perform an incremental update by default:
+
+1. Checks the repository's last indexed timestamp
+2. Fetches only files that have been added or modified since that time
+3. Updates the vector store with just the new/changed files
+
+This significantly speeds up the indexing process for repositories that have already been indexed once. To force a complete re-indexing, use the `--force-full` flag.
 
 ### Querying the Codebase
 
@@ -262,6 +309,39 @@ python -m app.main query --query "How are React hooks used for state management?
 ```bash
 python -m app.main query --query "How are they implemented?" --history '[{"query": "What are React hooks?", "answer": "React hooks are functions that..."}]'
 ```
+
+### Interactive Chat Mode
+
+For a more conversational experience, you can use the chat mode which maintains conversation history and allows for back-and-forth interaction.
+
+```bash
+python -m app.main chat
+```
+
+**Parameters:**
+- `--show-snippets`: Display code snippets in responses (optional, off by default)
+- `--explain`: Include detailed code explanations (optional, off by default) 
+- `--generate-docs`: Generate documentation (optional, off by default)
+- `--history-file`: Path to save/load chat history (optional)
+
+**Example - Basic chat:**
+```bash
+python -m app.main chat
+```
+
+**Example - Chat with code snippets and saved history:**
+```bash
+python -m app.main chat --show-snippets --history-file ./chat_history.json
+```
+
+**Chat Commands:**
+- `exit`, `quit`, or `q` - Exit chat mode
+- `clear` - Clear conversation history
+- `help` - Show available commands
+- `snippets on/off` - Toggle code snippet display
+- `explain on/off` - Toggle code explanation
+
+The chat mode maintains context between questions, allowing for follow-up questions and a more natural conversation flow. The conversation history is saved to the specified file (if provided) so you can continue conversations across sessions.
 
 ### Understanding Output
 
@@ -390,4 +470,301 @@ python -m app.main query --query "Are there any potential security vulnerabiliti
 ```bash
 python -m app.main query --query "What's the code style and contribution process for this project?"
 python -m app.main query --query "How are tests structured and implemented in this project?"
-``` 
+```
+
+### Interactive Learning Sessions
+
+Use the chat mode for extended learning sessions about a codebase:
+
+```bash
+python -m app.main chat --history-file ./learning_session.json
+```
+
+Example chat session:
+```
+> What are the key components of this application?
+[Response explaining components]
+
+> How does the error handling work?
+[Response explaining error handling, with context from previous question]
+
+> Show me examples of error handling
+[Response with examples, building on previous context]
+
+> explain on
+Code explanations enabled.
+
+> snippets on
+Code snippets enabled.
+
+> How could I improve the error handling?
+[Response with explanation and code snippets]
+```
+
+This approach allows for natural exploration of a codebase, with the AI maintaining context between questions. 
+
+## Docker Setup
+
+The application is fully containerized and can be run using Docker Compose:
+
+```bash
+# Start all services
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop all services
+docker-compose down
+```
+
+### Available Services
+
+- **PostgreSQL**: Database for structured data storage
+- **Redis**: Caching and task queue
+- **Celery Worker**: Asynchronous task processing
+- **FastAPI**: Backend API for the Next.js frontend
+
+### Environment Variables for Docker
+
+When using Docker, the environment variables are defined in `docker-compose.yml`. For local development, you can copy the `.env.example` file:
+
+```bash
+cp .env.example .env
+# Edit .env with your configuration
+```
+
+## API Usage
+
+The application provides a REST API for integration with frontend applications:
+
+### Authentication
+
+```bash
+# Register a new user
+curl -X POST http://localhost:8000/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username": "user", "email": "user@example.com", "password": "password"}'
+
+# Login to get JWT token
+curl -X POST http://localhost:8000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "user", "password": "password"}'
+```
+
+### Repository Management
+
+```bash
+# Create a new repository
+curl -X POST http://localhost:8000/api/repositories \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -d '{"name": "My Repo", "url": "owner/repo", "branch": "main"}'
+
+# List repositories
+curl -X GET http://localhost:8000/api/repositories \
+  -H "Authorization: Bearer <token>"
+```
+
+### Chat API
+
+The application supports both conversation-based chat and stateless stream queries:
+
+```bash
+# Create a conversation
+curl -X POST http://localhost:8000/api/chats/conversations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -d '{"title": "My Chat", "repository_id": "<repo_id>"}'
+
+# Add a message to a conversation (streaming)
+# Note: This requires SSE client support
+curl -X POST http://localhost:8000/api/chats/conversations/<conversation_id>/messages \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -d '{"content": "How is error handling implemented?"}'
+
+# Stream a stateless query
+curl -X POST http://localhost:8000/api/chats/stream \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -d '{"query": "Explain how testing works", "repository_id": "<repo_id>", "include_snippets": true}'
+```
+
+## Next.js Integration
+
+To use the API with a Next.js frontend:
+
+1. Use the Server-Sent Events (SSE) client to receive streaming responses
+2. Connect to the appropriate endpoints for chat functionality
+3. Handle authentication using the JWT token
+
+Example Next.js code for streaming chat:
+
+```javascript
+import { useEffect, useState } from 'react';
+
+function ChatComponent() {
+  const [messages, setMessages] = useState([]);
+  const [inputValue, setInputValue] = useState('');
+
+  const sendMessage = async () => {
+    const newMessage = { content: inputValue, isUser: true };
+    setMessages(prev => [...prev, newMessage]);
+    setInputValue('');
+
+    // Create an EventSource for SSE
+    const eventSource = new EventSource(
+      `http://localhost:8000/api/chats/stream?query=${encodeURIComponent(inputValue)}`,
+      { 
+        headers: { 
+          'Authorization': `Bearer ${localStorage.getItem('token')}` 
+        } 
+      }
+    );
+
+    let responseContent = '';
+
+    eventSource.addEventListener('message', (event) => {
+      const data = JSON.parse(event.data);
+      
+      if (!data.is_complete) {
+        responseContent += data.content;
+        setMessages(prev => [
+          ...prev.slice(0, -1),
+          newMessage,
+          { content: responseContent, isUser: false, isComplete: false }
+        ]);
+      } else {
+        setMessages(prev => [
+          ...prev.slice(0, -1),
+          newMessage,
+          { 
+            content: responseContent, 
+            isUser: false, 
+            isComplete: true,
+            metadata: data.metadata 
+          }
+        ]);
+        eventSource.close();
+      }
+    });
+    
+    eventSource.onerror = () => {
+      eventSource.close();
+    };
+  };
+
+  return (
+    <div>
+      {/* Chat messages */}
+      <div>
+        {messages.map((msg, i) => (
+          <div key={i} className={msg.isUser ? 'user-message' : 'system-message'}>
+            {msg.content}
+            {msg.metadata?.code_snippets && (
+              <div className="code-snippets">
+                {msg.metadata.code_snippets.map((snippet, j) => (
+                  <pre key={j}><code>{snippet.code}</code></pre>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      
+      {/* Input */}
+      <div>
+        <input
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
+        />
+        <button onClick={sendMessage}>Send</button>
+      </div>
+    </div>
+  );
+}
+```
+
+### Repository Isolation and Collection Management
+
+The application uses a sophisticated approach to manage multiple repositories:
+
+#### Collection Naming Strategy
+
+Each repository gets its own isolated ChromaDB collection using the following naming convention:
+```
+{collection_name}_{owner_id}_{repository_id}
+```
+
+For example:
+```
+code_chunks_f7e8a1b2_c9d0e3f4
+```
+
+This ensures:
+1. Complete isolation between repositories
+2. No data leakage or collisions
+3. Clean organization of vector data
+
+#### How Repository Management Works
+
+When you use the application:
+
+1. **First time indexing a repository**:
+   - Creates a new Repository record in the database
+   - Assigns a unique UUID to the repository
+   - Creates a dedicated ChromaDB collection
+   
+2. **Switching between repositories**:
+   - Simply use the `--repo` flag to specify which repository to use
+   - No need to re-index when switching
+   
+3. **View available repositories**:
+   ```bash
+   python -m app.main index --list-repos
+   ```
+
+#### Benefits Over Global Collection
+
+This approach provides several advantages:
+- Avoids reindexing when changing repositories
+- Allows having multiple repositories ready at the same time
+- Keeps vector search results specific to a single codebase
+- Supports different branches or versions of the same codebase 
+
+### Default Repository Configuration
+
+The application supports setting default repositories in your `.env` file, which are used when no `--repo` flag is provided:
+
+```bash
+# In .env
+GITHUB_REPOSITORY=owner/repo
+GITHUB_BRANCH=main
+```
+
+With this configuration:
+
+```bash
+# Uses owner/repo from the .env file
+python -m app.main index
+
+# Uses specific repository, overriding .env
+python -m app.main index --repo different/repo
+
+# Queries the default repository from .env
+python -m app.main query --query "How does feature X work?"
+
+# Starts chat session with the default repository
+python -m app.main chat
+```
+
+This makes it convenient to work with a primary repository while still having the flexibility to switch when needed.
+
+#### Command Priority Order
+
+The application follows this order of precedence for repository selection:
+1. Command-line parameter (`--repo` flag)
+2. Environment variable (`GITHUB_REPOSITORY` in `.env`)
+3. Error if no repository is specified 

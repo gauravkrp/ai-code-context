@@ -18,7 +18,7 @@ logger = setup_logger(__name__, "logs/vector_store.log")
 class ChromaStore:
     """ChromaDB vector store implementation."""
     
-    def __init__(self):
+    def __init__(self, repo_id=None):
         """Initialize the vector store."""
         # Store config
         self.config = config.vector_store
@@ -28,6 +28,25 @@ class ChromaStore:
         persistence_dir.mkdir(exist_ok=True, parents=True)
         
         logger.info(f"Using ChromaDB persistence directory: {persistence_dir.absolute()}")
+        
+        # Use repository-specific collection if repo_id is provided
+        if repo_id:
+            # Sanitize repo_id for use in collection name
+            # Replace all non-alphanumeric characters with underscores
+            sanitized_repo_id = ''.join(c if c.isalnum() else '_' for c in repo_id)
+            # Ensure the collection name starts and ends with alphanumeric characters
+            collection_name = f"{self.config.collection_name}_{sanitized_repo_id}"
+            # Truncate if too long (ChromaDB has a 63 character limit)
+            if len(collection_name) > 63:
+                collection_name = collection_name[:63]
+                # Ensure it ends with an alphanumeric character
+                while not collection_name[-1].isalnum():
+                    collection_name = collection_name[:-1]
+        else:
+            collection_name = self.config.collection_name
+            
+        self.collection_name = collection_name
+        logger.info(f"Using collection name: {collection_name}")
         
         try:
             # Use Client with SQLite settings for reliable persistence
@@ -47,41 +66,43 @@ class ChromaStore:
             logger.info(f"Found existing collections: {[c.name for c in collections]}")
             
             # Get or create collection with explicit distance function
-            logger.info(f"Getting or creating collection: {self.config.collection_name}")
+            logger.info(f"Getting or creating collection: {collection_name}")
             self.collection = self.client.get_or_create_collection(
-                name=self.config.collection_name,
+                name=collection_name,
                 metadata={"hnsw:space": "cosine"}
             )
             
             # Log collection count
             count = self.collection.count()
-            logger.info(f"Collection '{self.config.collection_name}' contains {count} documents")
+            logger.info(f"Collection '{collection_name}' contains {count} documents")
             
-            # Initialize embedding model
-            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-            
-            # Initialize chunker
-            self.chunker = CodeChunker(
-                chunk_size=config.chunking.chunk_size,
-                chunk_overlap=config.chunking.chunk_overlap
-            )
-        
         except Exception as e:
             logger.error(f"Error initializing ChromaDB: {str(e)}")
             logger.exception("Exception details:")
             raise
+        
+        # Initialize embedding model
+        self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+        
+        # Initialize chunker
+        self.chunker = CodeChunker(
+            chunk_size=config.chunking.chunk_size,
+            chunk_overlap=config.chunking.chunk_overlap
+        )
     
     def add_documents(
         self,
         documents: List[Dict[str, Any]],
-        batch_size: int = None
+        batch_size: int = None,
+        incremental: bool = False
     ) -> None:
         """
         Add documents to the vector store.
         
         Args:
-            documents: List of documents to add
+            documents: List of documents to add (either Document objects or dictionaries)
             batch_size: Optional batch size for processing
+            incremental: If True, only add documents that don't exist in the store
         """
         if not documents:
             logger.warning("No documents provided to add to vector store")
@@ -94,6 +115,21 @@ class ChromaStore:
             
             logger.info(f"Starting indexing of {len(documents)} documents in {total_batches} batches")
             start_time = time.time()
+            
+            # If incremental, get existing document IDs to avoid re-adding
+            existing_ids = set()
+            if incremental:
+                try:
+                    # Get count of documents in collection
+                    count = self.collection.count()
+                    if count > 0:
+                        # Get existing IDs (this might need to be batched for very large collections)
+                        results = self.collection.get(limit=count, include=["metadatas"])
+                        if results and "ids" in results:
+                            existing_ids = set(results["ids"])
+                        logger.info(f"Found {len(existing_ids)} existing documents for incremental update")
+                except Exception as e:
+                    logger.warning(f"Error checking existing documents for incremental update: {e}")
             
             # Process documents in batches
             for i in range(0, len(documents), batch_size):
@@ -108,37 +144,59 @@ class ChromaStore:
                 processed_batch = []
                 batch_ids = []
                 for j, doc in enumerate(batch):
-                    processed_doc = doc.copy()
+                    # Handle both Document objects and dictionaries
+                    if hasattr(doc, 'id') and hasattr(doc, 'text') and hasattr(doc, 'metadata'):
+                        # It's a Document object
+                        doc_id = str(doc.id)
+                        content = doc.text
+                        metadata = doc.metadata
+                    else:
+                        # It's a dictionary
+                        processed_doc = doc.copy()
+                        
+                        # Ensure required metadata exists
+                        metadata = processed_doc.get('metadata', {})
+                        if not metadata:
+                            # Create basic metadata from document fields
+                            metadata = {
+                                'file_path': processed_doc.get('file_path', ''),
+                                'language': processed_doc.get('language', 'unknown'),
+                                'size': processed_doc.get('size', 0),
+                                'timestamp': processed_doc.get('timestamp', '')
+                            }
+                        
+                        # Create a deterministic but unique ID based on content and file path
+                        # This helps with deduplication and makes IDs consistent across runs
+                        file_path = metadata.get('file_path', '')
+                        # Replace special characters with '_' to make safe IDs
+                        safe_path = ''.join(c if c.isalnum() else '_' for c in file_path)
+                        # Use a positive hash value
+                        content_hash = abs(hash(processed_doc['content'][:100])) if processed_doc.get('content') else 0
+                        doc_id = f"doc_{safe_path}_{content_hash}_{i+j}"
+                        content = processed_doc['content']
                     
-                    # Ensure required metadata exists
-                    metadata = processed_doc.get('metadata', {})
-                    if not metadata:
-                        # Create basic metadata from document fields
-                        metadata = {
-                            'file_path': processed_doc.get('file_path', ''),
-                            'language': processed_doc.get('language', 'unknown'),
-                            'size': processed_doc.get('size', 0),
-                            'timestamp': processed_doc.get('timestamp', '')
-                        }
-                    
-                    # Convert any list or dict values to strings
+                    # Convert any list or dict values in metadata to strings
                     metadata = {
                         k: str(v) if isinstance(v, (list, dict)) else v
                         for k, v in metadata.items()
                     }
                     
-                    processed_doc['metadata'] = metadata
-                    processed_batch.append(processed_doc)
+                    # Skip if this document ID already exists and we're doing incremental indexing
+                    if incremental and doc_id in existing_ids:
+                        logger.debug(f"Skipping existing document: {metadata.get('file_path', doc_id)}")
+                        continue
                     
-                    # Create a deterministic but unique ID based on content and file path
-                    # This helps with deduplication and makes IDs consistent across runs
-                    file_path = metadata.get('file_path', '')
-                    # Replace special characters with '_' to make safe IDs
-                    safe_path = ''.join(c if c.isalnum() else '_' for c in file_path)
-                    # Use a positive hash value
-                    content_hash = abs(hash(processed_doc['content'][:100])) if processed_doc.get('content') else 0
-                    doc_id = f"doc_{safe_path}_{content_hash}_{i+j}"
+                    processed_batch.append({
+                        'id': doc_id,
+                        'content': content,
+                        'metadata': metadata
+                    })
                     batch_ids.append(doc_id)
+            
+                # Skip empty batches
+                if not processed_batch:
+                    logger.info(f"Batch {batch_num} has no new documents to add, skipping")
+                    continue
                 
                 # Add batch to collection
                 self.collection.add(
@@ -188,7 +246,7 @@ class ChromaStore:
             
             # Log collection stats
             collection_count = self.collection.count()
-            logger.info(f"Collection '{self.config.collection_name}' contains {collection_count} documents")
+            logger.info(f"Collection '{self.collection_name}' contains {collection_count} documents")
             
             # Create query embedding
             query_embedding = self.embedding_model.encode(query).tolist()

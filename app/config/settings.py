@@ -83,14 +83,14 @@ class EmbeddingConfig:
 
 @dataclass
 class VectorStoreConfig:
-    """Configuration for vector store."""
-    persistence_dir: str = os.getenv("CHROMA_PERSISTENCE_DIR", "./chroma_db")
-    collection_name: str = os.getenv("CHROMA_COLLECTION_NAME", "code_chunks")
-    similarity_metric: str = os.getenv("SIMILARITY_METRIC", "cosine")
+    """Vector store configuration settings."""
+    persistence_dir: str = os.getenv("CHROMA_PERSISTENCE_DIR", "chroma_db")
+    collection_name: str = os.getenv("CHROMA_COLLECTION_NAME", "code_chunks")  # Base name for collections
+    batch_size: int = int(os.getenv("CHROMA_BATCH_SIZE", "100"))
+    similarity_metric: str = os.getenv("SIMILARITY_METRIC", "cosine")  # Options: cosine, l2, ip
+    use_distributed: bool = os.getenv("USE_DISTRIBUTED_STORE", "false").lower() == "true"
     use_gpu: bool = os.getenv("USE_GPU", "false").lower() == "true"
     num_workers: int = int(os.getenv("NUM_WORKERS", "4"))
-    batch_size: int = int(os.getenv("BATCH_SIZE", "100"))
-    use_distributed: bool = os.getenv("USE_DISTRIBUTED_STORE", "false").lower() == "true"
     num_shards: int = int(os.getenv("NUM_SHARDS", "4"))
     shard_size: int = int(os.getenv("SHARD_SIZE", "10000"))
     replication_factor: int = int(os.getenv("REPLICATION_FACTOR", "2"))
@@ -139,6 +139,14 @@ class AnalyticsConfig:
     track_query_metrics: bool = os.getenv("TRACK_QUERY_METRICS", "true").lower() == "true"
     metrics_retention_days: int = int(os.getenv("METRICS_RETENTION_DAYS", "30"))
 
+class DatabaseConfig:
+    """Database configuration settings."""
+    url: str = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/ai_code_context")
+    echo: bool = os.getenv("DATABASE_ECHO", "false").lower() == "true"
+    pool_size: int = int(os.getenv("DATABASE_POOL_SIZE", "10"))
+    max_overflow: int = int(os.getenv("DATABASE_MAX_OVERFLOW", "20"))
+    pool_recycle: int = int(os.getenv("DATABASE_POOL_RECYCLE", "1800"))  # 30 minutes
+
 @dataclass
 class Config:
     """Main configuration class."""
@@ -151,6 +159,7 @@ class Config:
     rag: RAGConfig
     documentation: DocumentationConfig
     analytics: AnalyticsConfig
+    database: DatabaseConfig
     
     def __init__(self):
         """Initialize configuration with all components."""
@@ -164,6 +173,7 @@ class Config:
         self.rag = RAGConfig()
         self.documentation = DocumentationConfig()
         self.analytics = AnalyticsConfig()
+        self.database = DatabaseConfig()
         
         # Create necessary directories
         self._create_directories()
